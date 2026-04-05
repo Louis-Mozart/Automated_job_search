@@ -20,6 +20,7 @@ from config import settings
 from src.cv_parser import CVParser
 from src.job_matcher import JobMatcher
 from src.job_searcher import JobSearcher
+from src.location_filter import score_location_match
 from src.models import RankedJob, UserProfile
 
 logging.basicConfig(level=logging.INFO)
@@ -103,6 +104,39 @@ def _ss(key: str, default=None):
 def _reset_results() -> None:
     st.session_state["results"] = None
     st.session_state["profile"] = None
+    st.session_state["user_query"] = None
+    # Also clear any in-progress refinement
+    st.session_state.pop("pending_search_text", None)
+    st.session_state.pop("draft_query", None)
+
+
+def rephrase_query(raw_text: str, api_key: str, model: str = "gpt-4o-mini") -> str:
+    """
+    Use an LLM to rewrite a freeform user description into a clean,
+    focused job-search query (2-4 sentences, no filler).
+    """
+    from openai import OpenAI
+
+    prompt = (
+        "You are a job search assistant. The user has written a freeform description "
+        "of the job they are looking for. Rewrite it as a clean, focused 2-4 sentence "
+        "job search description that will work well for matching against job listings.\n\n"
+        "Rules:\n"
+        "- Keep: desired job title(s), key skills, experience level, location, requirements.\n"
+        "- Remove: filler words, personal rambling, irrelevant details.\n"
+        "- Do NOT invent or assume details not mentioned by the user.\n"
+        "- Write in a neutral, professional tone.\n\n"
+        f"User's text:\n{raw_text[:3000]}\n\n"
+        "Rephrased description:"
+    )
+    client = OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=300,
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -116,6 +150,7 @@ def _build_services():
     adzuna_id    = _ss("adzuna_id")    or settings.adzuna_app_id
     adzuna_key   = _ss("adzuna_key")   or settings.adzuna_app_key
     country      = _ss("adzuna_country", settings.adzuna_country)
+    jooble_key   = _ss("jooble_key")   or settings.jooble_api_key
 
     parser   = CVParser(openai_api_key=openai_key, model=settings.openai_model)
     searcher = JobSearcher(
@@ -123,6 +158,7 @@ def _build_services():
         adzuna_app_id=adzuna_id,
         adzuna_app_key=adzuna_key,
         adzuna_country=country,
+        jooble_api_key=jooble_key,
     )
     matcher  = JobMatcher(
         openai_api_key=openai_key,
@@ -192,7 +228,7 @@ def render_sidebar() -> tuple[Optional[str], bool, int]:
         k = st.slider(
             "Number of top jobs to return (k)",
             min_value=1,
-            max_value=50,
+            max_value=100,
             value=settings.default_k,
             key="pref_k",
         )
@@ -312,6 +348,12 @@ def run_search(
     progress = st.progress(0, text="Starting …")
     status   = st.empty()
 
+    # Save raw user query so results page can display it
+    st.session_state["user_query"] = (
+        description_text.strip() if description_text.strip()
+        else (f"📄 {uploaded_file.name}" if uploaded_file else "")
+    )
+
     try:
         # ── 1. Parse profile ─────────────────────────────────────
         status.info("📋 Analysing your profile …")
@@ -362,12 +404,29 @@ def run_search(
         progress.progress(42, text="Fetching jobs …")
 
         if is_free_only:
+            location_set = bool(location or profile.desired_location)
+            loc_display = location or profile.desired_location or ""
+            # Rough check: is the desired location inside Germany/DACH?
+            _DACH = {"germany", "deutschland", "munich", "münchen", "berlin",
+                     "hamburg", "frankfurt", "cologne", "köln", "stuttgart",
+                     "düsseldorf", "austria", "wien", "vienna", "switzerland",
+                     "zürich", "zurich", "bern", "graz", "salzburg"}
+            loc_is_dach = any(w in loc_display.lower() for w in _DACH)
             st.info(
-                "ℹ️ **Free-tier mode** — using WeWorkRemotely (RSS), "
-                "Hacker News Hiring thread, and Remotive.  "
-                "These sources cover ~400 remote/tech jobs.  "
-                "For broader results (LinkedIn, Indeed, Glassdoor …) "
-                "add a **RapidAPI** or **Adzuna** key in the sidebar."
+                "ℹ️ **Free-tier mode** — active sources:\n"
+                "- **WeWorkRemotely, HN Hiring, Remotive** – remote tech jobs (~400)\n"
+                "- **Bundesagentur** – all job types in Germany "
+                "(waiter, cleaner, teacher…) – best for German cities\n\n"
+                + (
+                    f"📍 **{loc_display}** looks like a German city → "
+                    "Bundesagentur results included above. "
+                    if loc_is_dach and location_set else
+                    f"📍 **Non-tech jobs outside Germany** (e.g. Paris): add a free "
+                    "[Jooble key](https://jooble.org/api/index) or "
+                    "an [Adzuna key](https://developer.adzuna.com) with the right country. "
+                    if location_set and not loc_is_dach else ""
+                )
+                + "For LinkedIn/Indeed/Glassdoor add a **RapidAPI** key."
             )
 
         jobs = searcher.search(
@@ -400,6 +459,45 @@ def run_search(
         ranked = matcher.rank_jobs(profile, jobs, top_k=k)
         progress.progress(100, text="Done!")
         status.success(f"✅ Done! Showing your top {len(ranked)} matches.")
+
+        # ── Relevance sanity check ───────────────────────────────
+        # The free sources only carry remote/tech jobs. If the user is looking
+        # for a non-tech or in-person local role the ranked list will be filled
+        # with unrelated tech jobs. Detect this and warn immediately.
+        if is_free_only and ranked:
+            top_score = ranked[0].match_score
+            desired_str = " ".join(profile.desired_titles + (profile.search_queries or [])).lower()
+            _TECH_WORDS = {
+                "engineer", "developer", "software", "scientist", "analyst",
+                "devops", "designer", "architect", "researcher", "consultant",
+                "programmer", "data", "ml", "ai", "backend", "frontend",
+                "fullstack", "cloud", "security", "product", "sre",
+            }
+            # Match on whole words to avoid substring hits ("ai" inside "waiter")
+            desired_words = set(re.findall(r"\b\w+\b", desired_str))
+            looks_non_tech = bool(desired_str) and not (desired_words & _TECH_WORDS)
+            if top_score < 32 or looks_non_tech:
+                titles_str = (
+                    ", ".join(f'**{t}**' for t in profile.desired_titles[:2])
+                    if profile.desired_titles else "this role"
+                )
+                loc_hint = profile.desired_location or location or "your area"
+                st.warning(
+                    f"⚠️ **Low relevance warning** — the free sources "
+                    f"(WeWorkRemotely, HN Hiring, Remotive) **only contain "
+                    f"remote tech jobs**. Results shown may not match {titles_str} "
+                    f"in **{loc_hint}**.\n\n"
+                    "**To find the right jobs, pick one of these options:**\n"
+                    "- 🆓 **Adzuna** (250 free req/day) — "
+                    "sign up at [developer.adzuna.com](https://developer.adzuna.com), "
+                    "add your App ID + Key in the sidebar, and set the correct "
+                    "**Adzuna country** (e.g. `de` for Germany, `fr` for France).\n"
+                    "- 💳 **JSearch / RapidAPI** — aggregates Indeed, LinkedIn, "
+                    "Glassdoor and ZipRecruiter worldwide.\n"
+                    "- 🌐 Search directly on "
+                    "[Indeed](https://indeed.com), [StepStone](https://stepstone.de), "
+                    "or the job board of your country."
+                )
 
         st.session_state["results"] = ranked
         st.rerun()
@@ -440,9 +538,62 @@ def render_results(ranked_jobs: List[RankedJob]) -> None:
             _reset_results()
             st.rerun()
 
+    # ── Refine search query ───────────────────────────────────────
+    user_query = _ss("user_query", "")
+    is_file_search = user_query.startswith("\U0001f4c4 ")
+    st.markdown("#### \u270f\ufe0f Refine your search")
+    refine_text: str = st.text_area(
+        "Refine query",
+        value="" if is_file_search else user_query,
+        height=100,
+        key="refine_query_input",
+        placeholder="Edit your query here and click \u2019Re-search\u2019 to get new results"
+        + ("  (original input was a file upload)" if is_file_search else ""),
+        label_visibility="collapsed",
+    )
+    if is_file_search:
+        st.caption(f"\U0001f4c4 Original input: **{user_query[2:]}**")
+
+    rb1, rb2, _ = st.columns([1, 1, 3])
+    with rb1:
+        if st.button(
+            "\U0001f504 Re-search",
+            type="primary",
+            use_container_width=True,
+            disabled=not refine_text.strip(),
+            help="Run a new search with the query above.",
+        ):
+            st.session_state["pending_search_text"] = refine_text.strip()
+            st.session_state["results"] = None
+            st.session_state["profile"] = None
+            st.rerun()
+    with rb2:
+        has_oai = bool(_ss("openai_key") or settings.openai_api_key)
+        if st.button(
+            "\u2728 Rephrase with AI",
+            use_container_width=True,
+            disabled=not (has_oai and refine_text.strip()),
+            help=(
+                "Rewrite your query into a cleaner, more effective search description."
+                if has_oai else
+                "Add an OpenAI API key in the sidebar to enable AI rephrasing."
+            ),
+        ):
+            with st.spinner("\u2728 Rephrasing\u2026"):
+                try:
+                    oai_key = _ss("openai_key") or settings.openai_api_key
+                    rephrased = rephrase_query(refine_text, oai_key, settings.openai_model)
+                    st.session_state["refine_query_input"] = rephrased
+                    st.session_state["user_query"] = rephrased
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Rephrasing failed: {exc}")
+
+    st.markdown("---")
+
     # ── Filters ──────────────────────────────────────────────────
     with st.expander("🔧 Filter results", expanded=False):
-        fc1, fc2, fc3 = st.columns(3)
+        fc1, fc2, fc3, fc4 = st.columns(4)
         with fc1:
             min_score = st.slider("Minimum match score", 0, 100, 0, key="flt_score")
         with fc2:
@@ -450,12 +601,33 @@ def render_results(ranked_jobs: List[RankedJob]) -> None:
         with fc3:
             all_src = sorted({j.job.source for j in ranked_jobs})
             chosen_src = st.multiselect("Source", all_src, default=all_src, key="flt_src")
+        with fc4:
+            desired_loc = profile.desired_location if profile else ""
+            loc_filter = st.checkbox(
+                "Hide wrong-region jobs",
+                value=bool(desired_loc),
+                key="flt_location",
+                help="Remove jobs whose location is incompatible with your desired location.",
+            )
+
+    def _loc_ok(rj: RankedJob) -> bool:
+        """Return False when job is flagged as region-incompatible."""
+        if not loc_filter or not desired_loc:
+            return True
+        delta, _ = score_location_match(
+            desired_loc,
+            rj.job.location,
+            rj.job.remote,
+            rj.job.description[:400] if rj.job.description else "",
+        )
+        return delta >= 0
 
     filtered = [
         j for j in ranked_jobs
         if j.match_score >= min_score
         and (not remote_only or j.job.remote)
         and j.job.source in chosen_src
+        and _loc_ok(j)
     ]
 
     st.markdown(f"Showing **{len(filtered)}** of {len(ranked_jobs)} jobs")
@@ -487,6 +659,18 @@ def main() -> None:
 
     # ── Sidebar (always visible) ─────────────────────────────────
     location, remote, k = render_sidebar()
+
+    # ── Re-search triggered from results page ───────────────────
+    pending_text = _ss("pending_search_text")
+    if pending_text:
+        st.session_state["pending_search_text"] = None
+        parser, searcher, matcher = _build_services()
+        run_search(
+            parser, searcher, matcher,
+            None, pending_text,
+            location, remote, k,
+        )
+        return
 
     # ── Results page ─────────────────────────────────────────────
     if _ss("results") is not None:
@@ -535,7 +719,32 @@ def main() -> None:
                 "at a product company or startup. Preferred salary: $130k–$160k/year."
             ),
             label_visibility="collapsed",
+            key="draft_query",
         )
+
+        # ── Rephrase with AI ──────────────────────────────────────
+        has_oai = bool(_ss("openai_key") or settings.openai_api_key)
+        rp_col, _ = st.columns([1, 3])
+        with rp_col:
+            rephrase_clicked = st.button(
+                "\u2728 Rephrase with AI",
+                disabled=not (has_oai and bool(description_text.strip())),
+                help=(
+                    "Let AI rewrite your description into a concise, effective job search "
+                    "query for better matching results. Requires an OpenAI API key."
+                    if has_oai else
+                    "Add an OpenAI API key in the sidebar to enable AI rephrasing."
+                ),
+            )
+        if rephrase_clicked and description_text.strip():
+            with st.spinner("\u2728 Rephrasing your query\u2026"):
+                try:
+                    oai_key = _ss("openai_key") or settings.openai_api_key
+                    rephrased = rephrase_query(description_text, oai_key, settings.openai_model)
+                    st.session_state["draft_query"] = rephrased
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Rephrasing failed: {exc}")
 
     st.markdown("")
     _, btn_col, _ = st.columns([1.5, 3, 1.5])
