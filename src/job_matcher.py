@@ -18,6 +18,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from .models import Job, RankedJob, UserProfile
+from .location_filter import score_location_match
 
 logger = logging.getLogger(__name__)
 
@@ -250,11 +251,18 @@ class JobMatcher:
                 base += 3
                 reasons.append("Remote position (as requested)")
 
-            # Preferred location bonus
-            if profile.desired_location and job.location:
-                if profile.desired_location.lower() in job.location.lower():
-                    base += 3
-                    reasons.append(f"Located in {profile.desired_location}")
+            # Location scoring (bonus or penalty)
+            if profile.desired_location:
+                loc_delta, loc_reason = score_location_match(
+                    profile.desired_location,
+                    job.location,
+                    job.remote,
+                    job.description[:400] if job.description else "",
+                )
+                if loc_delta != 0:
+                    base += loc_delta
+                if loc_reason:
+                    reasons.append(loc_reason)
 
             ranked.append(
                 RankedJob(
