@@ -97,6 +97,43 @@ _TECH_SKILLS = [
     "REST API", "GraphQL", "Microservices", "Linux", "Git",
     "Agile", "Scrum", "Jira", "DevOps", "MLOps",
 ]
+
+# General (non-tech) skills – hospitality, education, trades, etc.
+_GENERAL_SKILLS = [
+    # Hospitality / Food & Beverage
+    "Waiter", "Waitress", "Server", "Barista", "Bartender", "Chef", "Cook",
+    "Kitchen Staff", "Dishwasher", "Catering", "Hospitality", "Food Service",
+    "Food Preparation", "Restaurant", "Café",
+    # Cleaning / Facility
+    "Cleaning", "Housekeeping", "Janitor", "Maintenance", "Sanitation",
+    "Maid", "Car Wash", "Auto Detailing", "Facility Management",
+    # Education / Teaching
+    "Teaching", "Teacher", "Tutor", "Tutoring", "Instructor", "Educator",
+    "Childcare", "Kindergarten", "Nursery", "Babysitting",
+    "Special Education", "Primary Education", "Secondary Education",
+    # Driving / Logistics
+    "Driving", "Driver", "Delivery", "Courier", "Logistics", "Transport",
+    "Forklift", "Warehouse", "Picking", "Packing", "Dispatching",
+    # Retail / Sales
+    "Retail", "Cashier", "Sales Assistant", "Shop Assistant", "Store Clerk",
+    "Customer Service", "Customer Support", "Sales", "Merchandising",
+    # Healthcare / Care
+    "Caregiver", "Care Worker", "Nursing Assistant", "Home Help",
+    "Support Worker", "Social Work", "Elderly Care",
+    # Security
+    "Security Guard", "Security Officer", "Doorman", "Bouncer",
+    # Trades
+    "Electrician", "Plumber", "Carpenter", "Painter", "Decorator",
+    "Handyman", "Mechanic", "Auto Technician", "Welder", "Construction",
+    # Gardening / Outdoor
+    "Gardening", "Gardener", "Landscaping", "Groundskeeper",
+    # Admin / Office (non-IT)
+    "Receptionist", "Administrative Assistant", "Secretary", "Data Entry",
+    "Office Assistant",
+]
+
+# Combined list used for skill extraction
+_ALL_SKILLS = _TECH_SKILLS + _GENERAL_SKILLS
 # fmt: on
 
 # Patterns that suggest a research / scientist / analyst job seeker
@@ -108,25 +145,111 @@ _RESEARCH_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Detect non-tech / service / trade job titles
+_GENERAL_TITLE_RE = re.compile(
+    r"\b(waiter|waitress|server|barista|bartender|chef|sous\s+chef|cook"
+    r"|kitchen\s+(?:staff|porter|hand|worker)|dishwasher"
+    r"|cleaner|cleaning\s+(?:staff|lady|person)|housekeeper|housekeeping"
+    r"|janitor|car\s+(?:cleaner|wash)\s*(?:attendant)?|auto\s+detailer"
+    r"|teacher|tutor|instructor|educator|lecturer"
+    r"|childcare\s*(?:worker)?|kindergarten\s*(?:teacher)?|nursery\s*(?:nurse)?"
+    r"|driver|delivery\s*(?:driver)?|courier|dispatcher"
+    r"|warehouse\s*(?:worker|operative|associate)?|picker|packer"
+    r"|forklift\s*(?:operator|driver)?|logistics\s*(?:coordinator|worker)?"
+    r"|cashier|sales\s*(?:assistant|associate|representative)?"
+    r"|shop\s*(?:assistant|keeper)?|store\s*(?:clerk|associate|assistant)?"
+    r"|retail\s*(?:worker|associate)?"
+    r"|customer\s*(?:service|support)\s*(?:representative|agent)?"
+    r"|receptionist|administrative\s*(?:assistant)?|secretary|office\s*(?:assistant)?"
+    r"|caregiver|care\s*(?:worker|giver|assistant)|nursing\s*assistant"
+    r"|home\s*(?:help|carer)|support\s*worker|social\s*(?:worker)?"
+    r"|security\s*(?:guard|officer)|doorman|bouncer"
+    r"|electrician|plumber|carpenter|painter|decorator|handyman|mechanic|welder"
+    r"|gardener|landscaper|groundskeeper)\b",
+    re.IGNORECASE,
+)
+
+# Pattern: "want to work as a X", "looking for a X", etc.
+_WORK_AS_RE = re.compile(
+    r"\b(?:work(?:ing)?\s+as\s+(?:a\s+|an\s+)?"
+    r"|looking\s+for\s+(?:a\s+|an\s+)?"
+    r"|want\s+to\s+(?:work\s+as\s+(?:a\s+|an\s+)?|be\s+(?:a\s+|an\s+)?)?"
+    r"|seeking\s+(?:a\s+|an\s+)?"
+    r"|job\s+as\s+(?:a\s+|an\s+)?"
+    r"|position\s+(?:as\s+)?(?:a\s+|an\s+)?)"
+    r"([a-z][a-z\-\s]{2,30}?)(?=\s+in\s|\s+at\s|\s+for\s|\s+position|\s+job|\s+role|[,.\n]|$)",
+    re.IGNORECASE,
+)
+
 # Map detected skills / title keywords → better search queries
+# Each entry: (trigger_keywords, search_query, min_matches_required)
 _QUERY_TEMPLATES = [
-    # (trigger keywords in description, search query to generate)
+    # ── Tech / Research ────────────────────────────────────────
     (["artificial intelligence", "machine learning", "research"],
-     "AI machine learning researcher"),
+     "AI machine learning researcher", 2),
     (["deep learning", "neural", "research"],
-     "deep learning research scientist"),
+     "deep learning research scientist", 2),
     (["nlp", "natural language"],
-     "NLP researcher machine learning"),
+     "NLP researcher machine learning", 1),
     (["computer vision", "image recognition"],
-     "computer vision researcher"),
+     "computer vision researcher", 1),
     (["data science", "data scientist"],
-     "data scientist machine learning"),
+     "data scientist machine learning", 1),
     (["reinforcement learning"],
-     "reinforcement learning researcher"),
+     "reinforcement learning researcher", 1),
     (["bioinformatics", "computational biology"],
-     "computational biology researcher"),
+     "computational biology researcher", 1),
     (["quantitative", "statistics", "econometrics"],
-     "quantitative researcher data scientist"),
+     "quantitative researcher data scientist", 2),
+    # ── Hospitality / Food & Beverage ─────────────────────────
+    (["waiter", "waitress", "restaurant", "food service",
+      "hospitality", "barista", "server", "café", "cafe"],
+     "waiter server restaurant hospitality", 1),
+    (["chef", "cook", "kitchen", "culinary", "sous chef", "cooking"],
+     "chef cook kitchen food preparation", 1),
+    (["bartender", "cocktail", "mixing drinks"],
+     "bartender bar staff mixologist", 1),
+    # ── Cleaning / Facility ────────────────────────────────────
+    (["cleaning", "cleaner", "housekeeping", "janitor",
+      "car wash", "car cleaner", "auto detail", "maid"],
+     "cleaner housekeeping facility maintenance", 1),
+    # ── Education / Teaching ───────────────────────────────────
+    (["teacher", "teaching", "education", "school",
+      "tutor", "tutoring", "instructor", "educator"],
+     "teacher educator school tutor", 1),
+    (["childcare", "kindergarten", "nursery", "babysitting", "nanny"],
+     "childcare worker kindergarten nursery teacher", 1),
+    # ── Driving / Logistics ────────────────────────────────────
+    (["driver", "delivery driver", "courier", "transport",
+      "logistics", "forklift", "warehouse", "dispatch"],
+     "driver delivery logistics warehouse", 1),
+    # ── Retail / Customer service ──────────────────────────────
+    (["retail", "cashier", "sales assistant", "shop assistant", "store clerk"],
+     "retail assistant cashier customer service", 1),
+    (["customer service", "customer support", "call center", "helpdesk"],
+     "customer service representative support agent", 1),
+    # ── Security ──────────────────────────────────────────────
+    (["security guard", "security officer", "doorman", "bouncer"],
+     "security guard officer", 1),
+    # ── Healthcare / Care ─────────────────────────────────────
+    (["caregiver", "care worker", "nursing assistant", "home help", "elderly care"],
+     "caregiver care worker nursing assistant", 1),
+    # ── Trades ────────────────────────────────────────────────
+    (["electrician", "electrical wiring", "electrical installation"],
+     "electrician electrical technician", 1),
+    (["plumber", "plumbing", "pipe installation"],
+     "plumber plumbing technician", 1),
+    (["mechanic", "automotive repair", "vehicle repair"],
+     "mechanic auto technician", 1),
+    (["carpenter", "woodwork", "joinery"],
+     "carpenter woodworker construction", 1),
+    (["painter", "decorator", "painting", "decorating"],
+     "painter decorator", 1),
+    # ── Administrative ────────────────────────────────────────
+    (["receptionist", "administrative assistant", "office assistant", "secretary"],
+     "receptionist administrative assistant office", 1),
+    (["gardener", "landscaping", "groundskeeper", "gardening"],
+     "gardener landscaper grounds maintenance", 1),
 ]
 
 _EXP_RE = [
@@ -136,13 +259,27 @@ _EXP_RE = [
     r"(\d+)\+?\s+yrs?\s+(?:of\s+)?experience",
 ]
 
+# Pre-compile word-boundary patterns for short skills (≤ 3 chars)
+# to avoid false positives like "R" matching inside "waiter".
+_SHORT_SKILL_RE: dict[str, re.Pattern] = {
+    s: re.compile(r"\b" + re.escape(s) + r"\b", re.IGNORECASE)
+    for s in _ALL_SKILLS if len(s) <= 3
+}
+
+
+def _skill_in_text(skill: str, text_lower: str, text_orig: str) -> bool:
+    """Return True if *skill* appears in the text as a proper word/phrase."""
+    if skill in _SHORT_SKILL_RE:
+        return bool(_SHORT_SKILL_RE[skill].search(text_orig))
+    return skill.lower() in text_lower
+
 
 def _parse_with_regex(text: str) -> UserProfile:
     """Best-effort profile extraction without an LLM."""
     text_lower = text.lower()
 
-    # Skills
-    skills = [s for s in _TECH_SKILLS if s.lower() in text_lower]
+    # Skills — check both tech and general lists (word-boundary safe)
+    skills = [s for s in _ALL_SKILLS if _skill_in_text(s, text_lower, text)]
 
     # Experience years
     exp_years: Optional[int] = None
@@ -156,33 +293,58 @@ def _parse_with_regex(text: str) -> UserProfile:
     emails = re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", text)
     phones = re.findall(r"\+?[\d][\d\s\-().]{7,14}[\d]", text)
 
-    # Desired titles via research pattern
+    # ── Desired titles ───────────────────────────────────────────
     desired_titles: List[str] = []
-    title_match = _RESEARCH_TITLE_RE.search(text)
-    if title_match:
-        t = title_match.group(0).lower().strip()
-        desired_titles = [t.title()]
 
-    # Build search queries — try to match a template first
+    # 1. Explicit "work as X" / "looking for X" pattern
+    work_as_match = _WORK_AS_RE.search(text)
+    if work_as_match:
+        candidate = work_as_match.group(1).strip().lower()
+        # Sanity: at least 3 chars and not a filler word
+        if len(candidate) >= 3 and candidate not in {"job", "work", "role", "position"}:
+            desired_titles.append(candidate.title())
+
+    # 2. Research / scientist / analyst title pattern
+    if not desired_titles:
+        title_match = _RESEARCH_TITLE_RE.search(text)
+        if title_match:
+            desired_titles.append(title_match.group(0).strip().title())
+
+    # 3. General service / trade title pattern
+    if not desired_titles:
+        title_match = _GENERAL_TITLE_RE.search(text)
+        if title_match:
+            desired_titles.append(title_match.group(0).strip().title())
+
+    # ── Search queries via templates ─────────────────────────────
     queries: List[str] = []
-    for triggers, query_str in _QUERY_TEMPLATES:
-        if sum(1 for kw in triggers if kw in text_lower) >= 2:
+    for triggers, query_str, min_matches in _QUERY_TEMPLATES:
+        if sum(1 for kw in triggers if kw in text_lower) >= min_matches:
             queries.append(query_str)
+            if len(queries) >= 3:  # avoid over-generating
+                break
 
-    # Fallback: use top detected skills
+    # Fallback 1: use desired title if we have one
+    if not queries and desired_titles:
+        queries.append(desired_titles[0])
+
+    # Fallback 2: top detected skills (skip trivial ones)
     if not queries and skills:
-        # Exclude single-letter skills (like "R") when building a query
         meaningful = [s for s in skills if len(s) > 1 and s not in ("R", "Go")]
         if meaningful:
             queries.append(" ".join(meaningful[:5]))
 
-    # Last resort: first meaningful words of the text
+    # Last resort: extract most meaningful words from the text
     if not queries:
-        words = re.findall(r"[a-zA-Z]{4,}", text)[:10]
-        queries = [" ".join(words)]
+        # Prefer capitalised words (likely nouns / proper names / job titles)
+        cap_words = re.findall(r"\b[A-ZÜÖÄ][a-zA-ZüöäÜÖÄß]{3,}\b", text)
+        words = cap_words[:6] if cap_words else re.findall(r"[a-zA-Z]{4,}", text)[:8]
+        queries = [" ".join(words)] if words else ["job opening"]
 
     # Keywords for matching = skills + query words
-    keywords = list(dict.fromkeys(skills + re.findall(r"[a-zA-Z]{4,}", text)[:30]))
+    keywords = list(dict.fromkeys(
+        skills + re.findall(r"[a-zA-Z]{4,}", text)[:30]
+    ))
 
     return UserProfile(
         raw_text=text,
