@@ -1,0 +1,8 @@
+[server]
+# Disable inotify-based file watching to prevent Streamlit from crawling
+# all loaded modules (which triggers a lazy torchvision import inside
+# transformers/zoedepth and causes a ModuleNotFoundError).
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
