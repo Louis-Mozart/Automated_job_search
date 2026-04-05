@@ -465,6 +465,238 @@ class AdzunaSearcher:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Bundesagentur für Arbeit  (German Federal Employment Agency)
+# Free public API – no registration needed. Germany / DACH region.
+# All job types: tech AND non-tech (waiter, cleaner, teacher …)
+# ─────────────────────────────────────────────────────────────────
+
+class BundesagenturSearcher:
+    """
+    German Federal Employment Agency – completely free, no API key required.
+    Covers ALL job types in Germany / Austria / Switzerland.
+    Results are strongest for German-language queries and German cities.
+    """
+
+    BASE_URL = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobs"
+    JOB_URL  = "https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}"
+    HEADERS  = {"X-API-Key": "jobboerse-jobsuche", "User-Agent": "AutoJobFinder/1.0"}
+
+    # Common EN → DE translations so queries like "waiter" hit the right results
+    _EN_TO_DE: dict[str, str] = {
+        "waiter": "Kellner", "waitress": "Kellnerin", "server": "Servicekraft",
+        "bartender": "Barkeeper", "barista": "Barista",
+        "chef": "Koch", "cook": "Koch", "kitchen staff": "Küchenhilfe",
+        "cleaner": "Reinigungskraft", "cleaning": "Reinigung",
+        "car cleaner": "Reinigung", "car wash": "Fahrzeugpflege",
+        "housekeeper": "Hauswirtschaft", "housekeeping": "Hauswirtschaft",
+        "janitor": "Hausmeister", "maintenance": "Instandhaltung",
+        "teacher": "Lehrer", "tutor": "Nachhilfelehrer",
+        "childcare": "Kinderpflege", "kindergarten teacher": "Erzieherin",
+        "driver": "Fahrer", "delivery driver": "Lieferfahrer",
+        "warehouse": "Lagermitarbeiter", "logistics": "Logistik",
+        "cashier": "Kassierer", "retail": "Einzelhandel",
+        "sales assistant": "Verkäufer", "shop assistant": "Verkäufer",
+        "security guard": "Sicherheitsmitarbeiter", "security": "Sicherheitsdienst",
+        "gardener": "Gärtner", "landscaper": "Landschaftsgärtner",
+        "electrician": "Elektriker", "plumber": "Klempner",
+        "carpenter": "Tischler", "painter": "Maler",
+        "mechanic": "Mechaniker", "welder": "Schweißer",
+        "caregiver": "Pflegekraft", "care worker": "Pflegehelfer",
+        "receptionist": "Empfangsmitarbeiter",
+    }
+
+    # EN → German spelling of city names (BA only accepts German names)
+    _CITY_DE: dict[str, str] = {
+        "munich": "München", "cologne": "Köln", "nuremberg": "Nürnberg",
+        "dusseldorf": "Düsseldorf", "düsseldorf": "Düsseldorf",
+        "vienna": "Wien", "zurich": "Zürich", "zurich": "Zürich",
+    }
+
+    # Countries whose cities BA actually covers
+    _DACH_COUNTRIES = {"germany", "austria", "switzerland"}
+
+    def _normalize_location(self, loc: str) -> tuple[str, bool]:
+        """
+        Return (ba_location, is_dach).
+        - ba_location: German spelling the BA API understands
+        - is_dach: False → skip BA entirely (non-German location)
+        """
+        if not loc:
+            return "", True   # no constraint = search Germany-wide
+
+        from .location_filter import _CITY_TO_COUNTRY
+        loc_lower = loc.lower().strip()
+
+        # City lookup (longest match first)
+        for city in sorted(_CITY_TO_COUNTRY, key=len, reverse=True):
+            if city in loc_lower:
+                country = _CITY_TO_COUNTRY[city]
+                if country in self._DACH_COUNTRIES:
+                    # Use German spelling if available, else original
+                    return self._CITY_DE.get(city, loc), True
+                return loc, False   # definitely non-DACH
+
+        # Fall through: unknown location – try as-is, BA returns 0 if not found
+        return self._CITY_DE.get(loc_lower, loc), True
+
+    def _queries_for(self, query: str) -> list[str]:
+        """Return [original, german_translation] if a translation exists."""
+        q_lower = query.lower().strip()
+        queries = [query]
+        # Longest-match first so "car cleaner" beats "cleaner"
+        for en in sorted(self._EN_TO_DE, key=len, reverse=True):
+            if en in q_lower:
+                de = self._EN_TO_DE[en]
+                if de.lower() != q_lower:
+                    queries.append(de)
+                break
+        return queries
+
+    def search(self, query: str, location: str = "", limit: int = 100) -> List[Job]:
+        ba_location, is_dach = self._normalize_location(location)
+        if not is_dach:
+            logger.info("Bundesagentur: skipping – location '%s' is outside DACH.", location)
+            return []
+
+        all_jobs: List[Job] = []
+        seen: set[str] = set()
+
+        for q in self._queries_for(query):
+            params: dict = {
+                "was": q,
+                "page": 1,
+                "size": min(limit, 100),
+            }
+            if ba_location:
+                params["wo"] = ba_location
+            try:
+                resp = requests.get(
+                    self.BASE_URL, params=params,
+                    headers=self.HEADERS, timeout=14,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:
+                logger.warning("Bundesagentur search failed for '%s': %s", q, exc)
+                continue
+
+            for item in data.get("stellenangebote") or []:
+                try:
+                    refnr   = item.get("refnr", "")
+                    if refnr in seen:
+                        continue
+                    seen.add(refnr)
+
+                    titel   = item.get("titel", "")
+                    beruf   = item.get("beruf", "")       # occupation category
+                    company = item.get("arbeitgeber", "")
+                    loc     = item.get("arbeitsort", {})
+                    city    = loc.get("ort", "")
+                    region  = loc.get("region", "")
+                    country = loc.get("land", "Deutschland")
+                    location_str = ", ".join(filter(None, [city, region, country]))
+
+                    # Construct a pseudo-description from available metadata
+                    # (the list endpoint does not include full text)
+                    desc_parts = []
+                    if beruf:
+                        desc_parts.append(f"Occupation: {beruf}")
+                    desc_parts.append(f"Title: {titel}")
+                    if company:
+                        desc_parts.append(f"Employer: {company}")
+                    if city:
+                        desc_parts.append(f"Location: {location_str}")
+                    description = ". ".join(desc_parts)
+
+                    all_jobs.append(Job(
+                        id=_uid("ba", titel, company),
+                        title=titel,
+                        company=company,
+                        location=location_str,
+                        remote=False,
+                        description=description,
+                        url=self.JOB_URL.format(refnr=refnr),
+                        posted_date=item.get("aktuelleVeroeffentlichungsdatum", ""),
+                        source="Bundesagentur",
+                    ))
+                except Exception as exc:
+                    logger.debug("BA item parse error: %s", exc)
+
+            if len(all_jobs) >= limit:
+                break
+
+        logger.info("Bundesagentur: %d jobs for '%s' in '%s' (ba_loc='%s').",
+                    len(all_jobs), query, location, ba_location)
+        return all_jobs[:limit]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Jooble  (worldwide – free API key, all job types)
+# Register for free at jooble.org/api/index
+# ─────────────────────────────────────────────────────────────────
+
+class JoobleSearcher:
+    """
+    Jooble – worldwide job aggregator (tech and non-tech).
+    Free API key: register at https://jooble.org/api/index
+    500 free searches / month.
+    """
+
+    BASE_URL = "https://jooble.org/api/{api_key}"
+
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+        self._url = self.BASE_URL.format(api_key=api_key)
+
+    def search(
+        self,
+        query: str,
+        location: str = "",
+        limit: int = 20,
+    ) -> List[Job]:
+        body: dict = {"keywords": query}
+        if location:
+            body["location"] = location
+        try:
+            resp = requests.post(self._url, json=body, timeout=14)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("Jooble search failed: %s", exc)
+            return []
+
+        jobs: List[Job] = []
+        for item in (data.get("jobs") or [])[:limit]:
+            try:
+                title   = item.get("title", "")
+                company = item.get("company", "")
+                loc_str = item.get("location", "")
+                snippet = _strip_html(item.get("snippet", ""))
+                link    = item.get("link", "")
+                jtype   = item.get("type", "")
+                updated = item.get("updated", "")[:10]
+                remote  = "remote" in (loc_str + " " + snippet).lower()
+
+                jobs.append(Job(
+                    id=_uid("jooble", title, company),
+                    title=title,
+                    company=company,
+                    location=loc_str,
+                    remote=remote,
+                    description=snippet,
+                    url=link,
+                    job_type=jtype,
+                    posted_date=updated,
+                    source="Jooble",
+                ))
+            except Exception as exc:
+                logger.debug("Jooble item parse error: %s", exc)
+
+        logger.info("Jooble: %d jobs for '%s'.", len(jobs), query)
+        return jobs
+
+
+# ─────────────────────────────────────────────────────────────────
 # Aggregator
 # ─────────────────────────────────────────────────────────────────
 
@@ -474,13 +706,17 @@ class JobSearcher:
     ready to be ranked by :class:`JobMatcher`.
 
     Always active (no key required):
-      - WeWorkRemotely  (~100 jobs via RSS)
-      - HNHiring        (300+ jobs, great for AI/ML/research)
-      - Remotive        (~18 jobs, browse all categories)
+      - WeWorkRemotely      (~100 remote tech jobs via RSS)
+      - HNHiring            (300+ jobs, great for AI/ML/research)
+      - Remotive            (~18 remote jobs, browse all categories)
+      - Bundesagentur (BA)  (all job types in Germany/DACH – waiter, cleaner…)
 
-    Optional (unlocked by API keys):
+    Optional (unlocked by API keys – free registration):
+      - Jooble              (worldwide, ALL job types, 500 req/month free)
+
+    Optional (unlocked by API keys – paid / limited free tier):
       - JSearch / RapidAPI  (LinkedIn · Indeed · Glassdoor · ZipRecruiter)
-      - Adzuna              (250 free req/day)
+      - Adzuna              (250 free req/day, many countries)
     """
 
     def __init__(
@@ -489,6 +725,7 @@ class JobSearcher:
         adzuna_app_id: Optional[str] = None,
         adzuna_app_key: Optional[str] = None,
         adzuna_country: str = "us",
+        jooble_api_key: Optional[str] = None,
     ) -> None:
         self._sources: dict = {}
 
@@ -500,7 +737,14 @@ class JobSearcher:
             self._sources["Adzuna"] = AdzunaSearcher(adzuna_app_id, adzuna_app_key, adzuna_country)
             logger.info("Adzuna enabled (country=%s).", adzuna_country)
 
+        if jooble_api_key:
+            self._sources["Jooble"] = JoobleSearcher(jooble_api_key)
+            logger.info("Jooble enabled (worldwide, all job types).")
+
         # Always-on free sources
+        # Bundesagentur first: covers all job types in Germany (non-tech too).
+        # Tech sources follow; BA results won't be crowded out at low max_results.
+        self._sources["Bundesagentur"]  = BundesagenturSearcher()
         self._sources["WeWorkRemotely"] = WeWorkRemotelySearcher()
         self._sources["HNHiring"]       = HNHiringSearcher()
         self._sources["Remotive"]       = RemotiveSearcher()
@@ -513,7 +757,7 @@ class JobSearcher:
 
     @property
     def has_paid_sources(self) -> bool:
-        return any(k in self._sources for k in ("JSearch", "Adzuna"))
+        return any(k in self._sources for k in ("JSearch", "Adzuna", "Jooble"))
 
     def search(
         self,
@@ -559,6 +803,16 @@ class JobSearcher:
 
                 elif isinstance(searcher, HNHiringSearcher):
                     _add(searcher.search(primary_query, limit=600))
+
+                elif isinstance(searcher, BundesagenturSearcher):
+                    # Location-aware: pass user location; BA returns results
+                    # only for German/DACH cities (0 results for Paris etc.)
+                    _add(searcher.search(primary_query, location=location or "", limit=100))
+
+                elif isinstance(searcher, JoobleSearcher):
+                    per_q = max(10, 60 // max(1, len(queries[:3])))
+                    for q in queries[:3]:
+                        _add(searcher.search(q, location=location or "", limit=per_q))
 
                 elif isinstance(searcher, JSearchSearcher):
                     per_q = max(20, 120 // max(1, len(queries[:3])))
