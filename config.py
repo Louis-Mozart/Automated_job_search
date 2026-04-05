@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     adzuna_app_key: Optional[str] = Field(default=None)
     adzuna_country: str = Field(default="us")
 
+    # ── Jooble ───────────────────────────────────────────────────
+    jooble_api_key: Optional[str] = Field(default=None)
+
     # ── App defaults ────────────────────────────────────────────
     default_k: int = Field(default=10)
     max_jobs_to_fetch: int = Field(default=600)
