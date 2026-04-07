@@ -198,9 +198,15 @@ class HNHiringSearcher:
     MAX_PAGES = 6   # 100 comments/page × 6 = up to 600 comments
 
     def _get_latest_post_id(self) -> Optional[str]:
+        # The monthly thread is always posted by the 'whoishiring' account.
+        # Adding author_whoishiring prevents matching unrelated Show HN / Ask HN posts.
         data = _get(
             _HN_SEARCH_URL,
-            params={"query": "Ask HN: Who is hiring", "tags": "story", "hitsPerPage": 1},
+            params={
+                "query": "Ask HN: Who is hiring",
+                "tags": "story,author_whoishiring",
+                "hitsPerPage": 1,
+            },
         )
         hits = (data or {}).get("hits", [])
         return hits[0]["objectID"] if hits else None
@@ -334,6 +340,76 @@ class RemotiveSearcher:
 # JSearch via RapidAPI  (free tier: 200 req / month)
 # ─────────────────────────────────────────────────────────────────
 
+# City / region → ISO-2 country code used to drop clearly-wrong-country results
+_LOCATION_TO_COUNTRY_CODE: dict[str, str] = {
+    # France
+    "paris": "FR", "lyon": "FR", "marseille": "FR", "toulouse": "FR",
+    "nice": "FR", "nantes": "FR", "strasbourg": "FR", "montpellier": "FR",
+    "bordeaux": "FR", "lille": "FR", "rennes": "FR", "grenoble": "FR",
+    "france": "FR",
+    # UK
+    "london": "GB", "manchester": "GB", "birmingham": "GB", "leeds": "GB",
+    "glasgow": "GB", "edinburgh": "GB", "bristol": "GB", "united kingdom": "GB",
+    # Germany
+    "berlin": "DE", "munich": "DE", "hamburg": "DE", "frankfurt": "DE",
+    "cologne": "DE", "düsseldorf": "DE", "dusseldorf": "DE", "germany": "DE",
+    # Spain
+    "madrid": "ES", "barcelona": "ES", "seville": "ES", "valencia": "ES", "spain": "ES",
+    # Italy
+    "rome": "IT", "milan": "IT", "naples": "IT", "turin": "IT", "italy": "IT",
+    # Netherlands / Belgium
+    "amsterdam": "NL", "rotterdam": "NL", "the hague": "NL", "netherlands": "NL",
+    "brussels": "BE", "antwerp": "BE", "ghent": "BE", "belgium": "BE",
+    # Switzerland / Austria
+    "zurich": "CH", "geneva": "CH", "bern": "CH", "switzerland": "CH",
+    "vienna": "AT", "graz": "AT", "austria": "AT",
+    # Nordics
+    "stockholm": "SE", "gothenburg": "SE", "sweden": "SE",
+    "oslo": "NO", "bergen": "NO", "norway": "NO",
+    "copenhagen": "DK", "denmark": "DK",
+    "helsinki": "FI", "finland": "FI",
+    # Portugal / Eastern Europe
+    "lisbon": "PT", "porto": "PT", "portugal": "PT",
+    "warsaw": "PL", "krakow": "PL", "poland": "PL",
+    "prague": "CZ", "czech": "CZ",
+    "budapest": "HU", "hungary": "HU",
+    "bucharest": "RO", "romania": "RO",
+    # North America
+    "new york": "US", "los angeles": "US", "chicago": "US", "houston": "US",
+    "san francisco": "US", "seattle": "US", "boston": "US", "miami": "US",
+    "austin": "US", "denver": "US", "united states": "US", "usa": "US",
+    "toronto": "CA", "montreal": "CA", "vancouver": "CA", "canada": "CA",
+    # APAC
+    "sydney": "AU", "melbourne": "AU", "brisbane": "AU", "australia": "AU",
+    "tokyo": "JP", "osaka": "JP", "japan": "JP",
+    "singapore": "SG",
+    "delhi": "IN", "mumbai": "IN", "bangalore": "IN", "india": "IN",
+    "beijing": "CN", "shanghai": "CN", "china": "CN",
+    # Middle East / Other
+    "dubai": "AE", "abu dhabi": "AE",
+    "são paulo": "BR", "rio de janeiro": "BR", "brazil": "BR",
+}
+
+
+def _country_code_for_location(location: str) -> Optional[str]:
+    """
+    Return the ISO-2 country code for a free-text location string, or None if unknown.
+    Uses longest-match so 'new york' beats 'york'.
+    """
+    loc_lower = location.lower()
+    for key in sorted(_LOCATION_TO_COUNTRY_CODE, key=len, reverse=True):
+        if key in loc_lower:
+            return _LOCATION_TO_COUNTRY_CODE[key]
+    return None
+
+
+# Adzuna country codes supported by the API (lowercase ISO-2)
+_ADZUNA_SUPPORTED: set[str] = {
+    "us", "gb", "de", "fr", "au", "ca", "nl", "sg",
+    "at", "be", "br", "in", "it", "mx", "nz", "pl", "ru", "za",
+}
+
+
 class JSearchSearcher:
     """Aggregates LinkedIn, Indeed, Glassdoor, ZipRecruiter via RapidAPI."""
 
@@ -358,7 +434,14 @@ class JSearchSearcher:
         if remote:
             search_str += " remote"
 
+        # Determine the expected country so we can drop clearly-wrong results.
+        # E.g. searching "cooker in Paris" should not return New York cooker jobs.
+        expected_country: Optional[str] = (
+            _country_code_for_location(location) if location else None
+        )
+
         jobs: List[Job] = []
+        _tried_fallback = False
         page = 1
         while len(jobs) < limit:
             data = _get(
@@ -369,6 +452,18 @@ class JSearchSearcher:
             if not data:
                 break
             items = data.get("data") or []
+
+            # JSearch has very sparse coverage outside the US/English-speaking world.
+            # If the location-scoped query returns nothing, retry with the bare query
+            # and rely solely on the country post-filter to keep results relevant.
+            if not items and location and not _tried_fallback:
+                _tried_fallback = True
+                search_str = query  # drop "in <location>" suffix
+                if remote:
+                    search_str += " remote"
+                logger.debug("JSearch: 0 results for location-scoped query, retrying as '%s'", search_str)
+                continue
+
             if not items:
                 break
             for item in items:
@@ -378,6 +473,19 @@ class JSearchSearcher:
                 state   = item.get("job_state") or ""
                 country = item.get("job_country") or ""
                 loc     = ", ".join(p for p in [city, state, country] if p)
+                is_remote = bool(item.get("job_is_remote", False))
+
+                # Drop jobs in a different country (or unknown country) when we
+                # expect a specific one. The 'country and' guard was removed so that
+                # jobs with an empty country field don't slip through the filter.
+                if expected_country and not is_remote:
+                    if not country or country.upper() != expected_country.upper():
+                        logger.debug(
+                            "JSearch: dropping '%s' – country %r ≠ expected %s",
+                            item.get("job_title", ""), country, expected_country,
+                        )
+                        continue
+
                 jobs.append(
                     Job(
                         id=item.get("job_id") or _uid("jsearch", item.get("job_title", ""), item.get("employer_name", "")),
@@ -392,7 +500,7 @@ class JSearchSearcher:
                         salary_period=(item.get("job_salary_period") or "year").lower(),
                         posted_date=item.get("job_posted_at_datetime_utc", ""),
                         job_type=(item.get("job_employment_type") or "").lower(),
-                        remote=bool(item.get("job_is_remote", False)),
+                        remote=is_remote,
                         source="JSearch",
                         required_skills=item.get("job_required_skills") or [],
                         raw_data=item,
@@ -419,6 +527,17 @@ class AdzunaSearcher:
         self._country = country
 
     def search(self, query: str, location: Optional[str] = None, limit: int = 30) -> List[Job]:
+        # Auto-detect the Adzuna country endpoint from the location string so that
+        # typing "Paris" automatically hits the French database (/fr/search/) instead
+        # of the default US database. Falls back to the configured country if the
+        # location is unknown or not covered by Adzuna.
+        country = self._country
+        if location:
+            iso = _country_code_for_location(location)
+            if iso and iso.lower() in _ADZUNA_SUPPORTED:
+                country = iso.lower()
+                logger.debug("Adzuna: auto-selected country '%s' from location '%s'.", country, location)
+
         jobs: List[Job] = []
         page = 1
         per_page = min(50, limit)
@@ -430,7 +549,7 @@ class AdzunaSearcher:
             }
             if location:
                 params["where"] = location
-            data = _get(self.BASE.format(country=self._country, page=page), params=params)
+            data = _get(self.BASE.format(country=country, page=page), params=params)
             if not data:
                 break
             results = data.get("results") or []
@@ -697,6 +816,205 @@ class JoobleSearcher:
 
 
 # ─────────────────────────────────────────────────────────────────
+# France Travail  (formerly Pôle Emploi)
+# Free – register once at francetravail.io/partenaire to get credentials.
+# Covers ALL job types in France (tech AND non-tech).
+# ─────────────────────────────────────────────────────────────────
+
+class FranceTravailSearcher:
+    """
+    France's official job board – completely free with a registered API key.
+    Register at https://francetravail.io/partenaire (takes ~5 minutes).
+    Covers all job types: cook, waiter, cleaner, developer, nurse …
+    Results are strongest for French-language queries and French cities.
+    """
+
+    TOKEN_URL  = "https://entreprise.francetravail.fr/connexion/oauth2/access_token"
+    SEARCH_URL = "https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search"
+
+    # EN → FR keyword translations for better matching
+    _EN_TO_FR: dict[str, str] = {
+        "cook": "cuisinier", "cooker": "cuisinier", "cooking": "cuisine",
+        "chef": "chef cuisinier", "kitchen staff": "aide cuisine",
+        "waiter": "serveur", "waitress": "serveuse", "server": "serveur",
+        "bartender": "barman", "barista": "barista",
+        "cleaner": "agent entretien", "cleaning": "nettoyage",
+        "car cleaner": "nettoyage véhicule", "car wash": "lavage auto",
+        "housekeeper": "femme de chambre", "housekeeping": "gouvernante",
+        "janitor": "gardien", "maintenance": "maintenance",
+        "teacher": "professeur", "tutor": "tuteur",
+        "childcare": "auxiliaire puériculture", "kindergarten teacher": "éducateur jeunes enfants",
+        "driver": "chauffeur", "delivery driver": "livreur",
+        "warehouse": "magasinier", "logistics": "logistique",
+        "cashier": "caissier", "retail": "vendeur",
+        "sales assistant": "vendeur", "shop assistant": "vendeur",
+        "security guard": "agent sécurité", "security": "sécurité",
+        "gardener": "jardinier", "landscaper": "paysagiste",
+        "electrician": "électricien", "plumber": "plombier",
+        "carpenter": "menuisier", "painter": "peintre",
+        "mechanic": "mécanicien", "welder": "soudeur",
+        "caregiver": "aide soignant", "care worker": "aide soignant", "nurse": "infirmier",
+        "receptionist": "réceptionniste",
+        "developer": "développeur", "python developer": "développeur python",
+        "engineer": "ingénieur", "data scientist": "data scientist",
+        "project manager": "chef de projet",
+    }
+
+    # City → INSEE département code for spatial filtering
+    _CITY_TO_DEPT: dict[str, str] = {
+        "paris": "75", "hauts-de-seine": "92", "seine-saint-denis": "93",
+        "val-de-marne": "94", "île-de-france": "75",
+        "lyon": "69", "villeurbanne": "69",
+        "marseille": "13", "aix-en-provence": "13",
+        "toulouse": "31",
+        "nice": "06", "cannes": "06", "antibes": "06",
+        "nantes": "44",
+        "strasbourg": "67",
+        "montpellier": "34",
+        "bordeaux": "33",
+        "lille": "59", "roubaix": "59", "tourcoing": "59",
+        "rennes": "35",
+        "grenoble": "38",
+        "nancy": "54",
+        "tours": "37",
+        "metz": "57",
+        "clermont-ferrand": "63",
+        "dijon": "21",
+        "rouen": "76",
+        "reims": "51",
+        "saint-étienne": "42",
+        "toulon": "83",
+    }
+
+    # France-related location keywords
+    _FRANCE_KEYWORDS = {
+        "paris", "france", "française", "lyon", "marseille", "toulouse",
+        "nice", "nantes", "strasbourg", "montpellier", "bordeaux", "lille",
+        "rennes", "grenoble", "nancy", "metz", "rouen", "reims", "dijon",
+        "toulon", "saint-étienne", "clermont-ferrand",
+    }
+
+    def __init__(self, client_id: str, client_secret: str) -> None:
+        self._client_id     = client_id
+        self._client_secret = client_secret
+        self._token: Optional[str] = None
+        self._token_expiry: float  = 0.0
+
+    def _get_token(self) -> Optional[str]:
+        import time
+        if self._token and time.time() < self._token_expiry - 60:
+            return self._token
+        try:
+            resp = requests.post(
+                self.TOKEN_URL,
+                params={"realm": "/partenaire"},
+                data={
+                    "grant_type":    "client_credentials",
+                    "client_id":     self._client_id,
+                    "client_secret": self._client_secret,
+                    "scope":         "api_offresdemploiv2 o2dsoffre",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._token        = data["access_token"]
+            self._token_expiry = time.time() + data.get("expires_in", 1800)
+            return self._token
+        except Exception as exc:
+            logger.warning("France Travail: token request failed: %s", exc)
+            return None
+
+    def _is_france_location(self, loc: str) -> bool:
+        """Return True if the location string refers to a French city/region."""
+        if not loc:
+            return True  # no constraint → search France-wide
+        loc_lower = loc.lower()
+        return any(kw in loc_lower for kw in self._FRANCE_KEYWORDS)
+
+    def _translate_query(self, query: str) -> str:
+        """Translate the first matching EN term to French, or return query unchanged."""
+        q_lower = query.lower().strip()
+        for en in sorted(self._EN_TO_FR, key=len, reverse=True):
+            if en in q_lower:
+                return self._EN_TO_FR[en]
+        return query
+
+    def search(self, query: str, location: str = "", limit: int = 100) -> List[Job]:
+        if not self._is_france_location(location):
+            logger.info("France Travail: skipping – location '%s' is outside France.", location)
+            return []
+
+        token = self._get_token()
+        if not token:
+            return []
+
+        # Detect département for spatial filtering
+        dept: Optional[str] = None
+        loc_lower = location.lower()
+        for city, dept_code in sorted(self._CITY_TO_DEPT.items(), key=lambda x: len(x[0]), reverse=True):
+            if city in loc_lower:
+                dept = dept_code
+                break
+
+        fr_query = self._translate_query(query)
+        params: dict = {
+            "motsCles":         fr_query,
+            "nbreMaxFrParPage": min(limit, 150),
+        }
+        if dept:
+            params["departement"] = dept
+
+        try:
+            resp = requests.get(
+                self.SEARCH_URL,
+                params=params,
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                timeout=14,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("France Travail search failed for '%s': %s", fr_query, exc)
+            return []
+
+        jobs: List[Job] = []
+        for item in (data.get("resultats") or [])[:limit]:
+            try:
+                jid     = item.get("id", "")
+                title   = item.get("intitule", "")
+                company = (item.get("entreprise") or {}).get("nom", "")
+                lieu    = item.get("lieuTravail") or {}
+                loc_str = lieu.get("libelle", location)
+                url     = (
+                    item.get("origineOffre", {}).get("urlOrigine")
+                    or f"https://candidat.francetravail.fr/offres/recherche/detail/{jid}"
+                )
+                desc     = item.get("description", "")
+                contract = item.get("typeContratLibelle", "")
+                date_pub = item.get("dateCreation", "")[:10]
+
+                jobs.append(Job(
+                    id=_uid("ft", title, company),
+                    title=title,
+                    company=company,
+                    location=loc_str,
+                    remote=False,
+                    description=desc,
+                    url=url,
+                    posted_date=date_pub,
+                    job_type=contract,
+                    source="France Travail",
+                ))
+            except Exception as exc:
+                logger.debug("France Travail item parse error: %s", exc)
+
+        logger.info("France Travail: %d jobs for '%s' in '%s' (dept=%s).",
+                    len(jobs), fr_query, location, dept)
+        return jobs
+
+
+# ─────────────────────────────────────────────────────────────────
 # Aggregator
 # ─────────────────────────────────────────────────────────────────
 
@@ -711,10 +1029,11 @@ class JobSearcher:
       - Remotive            (~18 remote jobs, browse all categories)
       - Bundesagentur (BA)  (all job types in Germany/DACH – waiter, cleaner…)
 
-    Optional (unlocked by API keys – free registration):
+    Optional (free registration):
+      - France Travail      (all job types in France – cook, waiter, dev…)
       - Jooble              (worldwide, ALL job types, 500 req/month free)
 
-    Optional (unlocked by API keys – paid / limited free tier):
+    Optional (paid / limited free tier):
       - JSearch / RapidAPI  (LinkedIn · Indeed · Glassdoor · ZipRecruiter)
       - Adzuna              (250 free req/day, many countries)
     """
@@ -726,6 +1045,8 @@ class JobSearcher:
         adzuna_app_key: Optional[str] = None,
         adzuna_country: str = "us",
         jooble_api_key: Optional[str] = None,
+        france_travail_client_id: Optional[str] = None,
+        france_travail_client_secret: Optional[str] = None,
     ) -> None:
         self._sources: dict = {}
 
@@ -740,6 +1061,12 @@ class JobSearcher:
         if jooble_api_key:
             self._sources["Jooble"] = JoobleSearcher(jooble_api_key)
             logger.info("Jooble enabled (worldwide, all job types).")
+
+        if france_travail_client_id and france_travail_client_secret:
+            self._sources["FranceTravail"] = FranceTravailSearcher(
+                france_travail_client_id, france_travail_client_secret
+            )
+            logger.info("France Travail enabled (all job types in France).")
 
         # Always-on free sources
         # Bundesagentur first: covers all job types in Germany (non-tech too).
@@ -809,19 +1136,49 @@ class JobSearcher:
                     # only for German/DACH cities (0 results for Paris etc.)
                     _add(searcher.search(primary_query, location=location or "", limit=100))
 
+                elif isinstance(searcher, FranceTravailSearcher):
+                    # Location-aware: pass user location; FT returns results
+                    # only for French cities (skips non-France locations).
+                    per_q = max(20, 100 // max(1, len(queries[:3])))
+                    for q in queries[:3]:
+                        _add(searcher.search(q, location=location or "", limit=per_q))
+
                 elif isinstance(searcher, JoobleSearcher):
                     per_q = max(10, 60 // max(1, len(queries[:3])))
                     for q in queries[:3]:
                         _add(searcher.search(q, location=location or "", limit=per_q))
 
                 elif isinstance(searcher, JSearchSearcher):
-                    per_q = max(20, 120 // max(1, len(queries[:3])))
-                    for q in queries[:3]:
-                        _add(searcher.search(q, location=location, remote=remote, limit=per_q))
+                    # JSearch index is overwhelmingly US / English-speaking world.
+                    # For other regions it almost always returns 0 results and then
+                    # falls back to unfiltered US jobs – so skip it entirely there.
+                    _JSEARCH_STRONG = {"US", "GB", "CA", "AU", "SG", "IN", "NZ"}
+                    jsearch_country = (
+                        _country_code_for_location(location) if location else None
+                    )
+                    if jsearch_country and jsearch_country.upper() not in _JSEARCH_STRONG:
+                        logger.info(
+                            "JSearch: skipping – location '%s' (%s) is outside "
+                            "JSearch's strong-coverage region.",
+                            location, jsearch_country,
+                        )
+                    else:
+                        per_q = max(20, 120 // max(1, len(queries[:3])))
+                        for q in queries[:3]:
+                            _add(searcher.search(q, location=location, remote=remote, limit=per_q))
 
                 elif isinstance(searcher, AdzunaSearcher):
-                    per_q = max(20, 120 // max(1, len(queries[:3])))
-                    for q in queries[:3]:
+                    # Adzuna works best with short 1-3 word queries.
+                    # The auto-generated query can be long compound strings like
+                    # "chef cook kitchen food preparation" which return 0 results.
+                    # Prefer the desired job title; fall back to the first 2 words
+                    # of the primary query.
+                    if profile.desired_titles:
+                        adzuna_qs = [profile.desired_titles[0]]
+                    else:
+                        adzuna_qs = [" ".join(primary_query.split()[:2])]
+                    per_q = max(20, 120 // max(1, len(adzuna_qs)))
+                    for q in adzuna_qs:
                         _add(searcher.search(q, location=location, limit=per_q))
 
             except Exception as exc:

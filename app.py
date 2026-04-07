@@ -151,6 +151,8 @@ def _build_services():
     adzuna_key   = _ss("adzuna_key")   or settings.adzuna_app_key
     country      = _ss("adzuna_country", settings.adzuna_country)
     jooble_key   = _ss("jooble_key")   or settings.jooble_api_key
+    ft_id        = _ss("ft_client_id")     or settings.france_travail_client_id
+    ft_secret    = _ss("ft_client_secret") or settings.france_travail_client_secret
 
     parser   = CVParser(openai_api_key=openai_key, model=settings.openai_model)
     searcher = JobSearcher(
@@ -159,6 +161,8 @@ def _build_services():
         adzuna_app_key=adzuna_key,
         adzuna_country=country,
         jooble_api_key=jooble_key,
+        france_travail_client_id=ft_id,
+        france_travail_client_secret=ft_secret,
     )
     matcher  = JobMatcher(
         openai_api_key=openai_key,
@@ -179,9 +183,10 @@ def render_sidebar() -> tuple[Optional[str], bool, int]:
         # ── API Keys ──────────────────────────────────────────────
         with st.expander("🔑 API Keys", expanded=False):
             st.info(
-                "**No keys needed to start!** The app always uses three free sources: "
-                "**WeWorkRemotely** (RSS), **HN Hiring** (monthly thread, great for AI/ML), "
-                "and **Remotive**. Add keys below for LinkedIn/Indeed/Glassdoor coverage."
+                "**No keys needed to start!** Free sources always active: "
+                "**WeWorkRemotely**, **HN Hiring** (great for AI/ML), **Remotive**, "
+                "and **Bundesagentur** (all job types in Germany/DACH).\n\n"
+                "Add keys below to unlock more countries and job types."
             )
             st.session_state["openai_key"] = st.text_input(
                 "OpenAI API Key",
@@ -195,6 +200,20 @@ def render_sidebar() -> tuple[Optional[str], bool, int]:
                 type="password",
                 help="Aggregates LinkedIn, Indeed, Glassdoor & more. rapidapi.com → JSearch",
             )
+            st.markdown(
+                "**France Travail** – free, all job types in France (cook, waiter, dev…) "
+                "– register at [francetravail.io/partenaire](https://francetravail.io/partenaire)"
+            )
+            st.session_state["ft_client_id"] = st.text_input(
+                "France Travail Client ID",
+                value=_ss("ft_client_id", settings.france_travail_client_id or ""),
+                type="password",
+            )
+            st.session_state["ft_client_secret"] = st.text_input(
+                "France Travail Client Secret",
+                value=_ss("ft_client_secret", settings.france_travail_client_secret or ""),
+                type="password",
+            )
             st.markdown("**Adzuna** – free tier at developer.adzuna.com")
             st.session_state["adzuna_id"] = st.text_input(
                 "Adzuna App ID",
@@ -207,10 +226,15 @@ def render_sidebar() -> tuple[Optional[str], bool, int]:
                 type="password",
             )
             st.session_state["adzuna_country"] = st.selectbox(
-                "Adzuna country",
+                "Adzuna fallback country",
                 options=["us", "gb", "de", "fr", "au", "ca", "nl", "sg"],
                 index=["us", "gb", "de", "fr", "au", "ca", "nl", "sg"].index(
                     _ss("adzuna_country", settings.adzuna_country)
+                ),
+                help=(
+                    "Used only when the Preferred Location field is empty or unrecognised. "
+                    "When you set a location (e.g. 'Paris'), the correct country is detected "
+                    "automatically and this setting is ignored."
                 ),
             )
 
@@ -430,7 +454,7 @@ def run_search(
             )
 
         jobs = searcher.search(
-            profile=profile,
+            profile,
             location=location or profile.desired_location,
             remote=remote or profile.desired_remote,
             max_results=max(settings.max_jobs_to_fetch, k * 8),
@@ -678,7 +702,7 @@ def main() -> None:
         return
 
     # ── Input page ───────────────────────────────────────────────
-    tab_cv, tab_text = st.tabs(["📄 Upload CV / Resume", "✍️ Describe What You Want"])
+    tab_text, tab_cv = st.tabs(["✍️ Describe What You Want", "📄 Upload CV / Resume"])
 
     uploaded_file   = None
     description_text = ""

@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     # ── Jooble ───────────────────────────────────────────────────
     jooble_api_key: Optional[str] = Field(default=None)
 
+    # ── France Travail (Pôle Emploi) ─────────────────────────────
+    france_travail_client_id:     Optional[str] = Field(default=None)
+    france_travail_client_secret: Optional[str] = Field(default=None)
+
     # ── App defaults ────────────────────────────────────────────
     default_k: int = Field(default=10)
     max_jobs_to_fetch: int = Field(default=600)

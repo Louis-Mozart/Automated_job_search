@@ -341,6 +341,23 @@ def _parse_with_regex(text: str) -> UserProfile:
         words = cap_words[:6] if cap_words else re.findall(r"[a-zA-Z]{4,}", text)[:8]
         queries = [" ".join(words)] if words else ["job opening"]
 
+    # ── Desired location ─────────────────────────────────────────
+    # Match patterns like "in Paris", "in Paris, France", "based in London",
+    # "looking for a job in Berlin", "relocate to Munich", etc.
+    desired_location: Optional[str] = None
+    _LOC_RE = re.compile(
+        r"(?:\bin\b|\bbased in\b|\blocated in\b|\brelocate to\b|\blooking.*?in\b)"
+        r"\s+([A-ZÜÖÄ][a-zA-ZüöäÜÖÄ\s\-]{2,40}?)(?:[,.]|\s+(?:and|for|to|looking|as|where)\b|$)",
+        re.IGNORECASE,
+    )
+    for m in _LOC_RE.finditer(text):
+        candidate = m.group(1).strip().rstrip(",. ")
+        # Validate: must appear in the known location table
+        from src.job_searcher import _LOCATION_TO_COUNTRY_CODE
+        if any(kw in candidate.lower() for kw in _LOCATION_TO_COUNTRY_CODE):
+            desired_location = candidate
+            break
+
     # Keywords for matching = skills + query words
     keywords = list(dict.fromkeys(
         skills + re.findall(r"[a-zA-Z]{4,}", text)[:30]
@@ -353,6 +370,7 @@ def _parse_with_regex(text: str) -> UserProfile:
         skills=skills,
         experience_years=exp_years,
         desired_titles=desired_titles,
+        desired_location=desired_location,
         keywords=keywords[:25],
         search_queries=queries[:5],
     )
