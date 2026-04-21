@@ -123,7 +123,7 @@ Final score = 0.65 × semantic + 0.35 × keyword_overlap
 │                                              │
 │  Sidebar: API keys · Location · Remote · k  │
 │                                              │
-│  [ 🚀 Find My Top k Jobs ]                  │
+│  [ Find My Top k Jobs ]                  │
 └──────────────────────────────────────────────┘
                ↓
 ┌──────────────────────────────────────────────┐
