@@ -93,7 +93,7 @@ Automated_job_search/
 
 ---
 
-## 🔧 How the Matching Works
+## How the Matching Works
 
 ```
 Profile text  ──► Embedder ──► vector_p
