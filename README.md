@@ -46,7 +46,7 @@ pip install -r requirements.txt
 ```
 
 > **Note:** `sentence-transformers` downloads the `all-MiniLM-L6-v2` model (~80 MB)
-> on first use. If you supply an OpenAI key it is used instead and the model is
+> on first use. If you supply an OpenAI key, it is used instead and the model is
 > never downloaded.
 
 ### 4 — Configure API keys (optional but recommended)
