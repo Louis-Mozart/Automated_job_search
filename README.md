@@ -144,7 +144,7 @@ Final score = 0.65 × semantic + 0.35 × keyword_overlap
 
 ---
 
-## 💡 Tips
+## Tips
 
 * **No API keys?** The app works immediately using the free Remotive API (remote tech jobs).
 * **Best results:** Add both `OPENAI_API_KEY` and `RAPIDAPI_KEY` — you'll get richer job data and more accurate ranking.
