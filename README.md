@@ -137,7 +137,7 @@ Final score = 0.65 × semantic + 0.35 × keyword_overlap
 │  Each card: title · company · location ·     │
 │    salary · match % · matched skills ·       │
 │    skills to develop · description ·         │
-│    [ 🚀 Apply Now ]                          │
+│    [ Apply Now ]                          │
 │  Filters: min score · remote · source        │
 └──────────────────────────────────────────────┘
 ```
