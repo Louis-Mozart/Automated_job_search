@@ -16,7 +16,7 @@ An AI-powered automated job search application. Provide your **CV** (PDF/DOCX/TX
 | **CV parsing** | PDF, DOCX, TXT — structured extraction via GPT or regex fallback |
 | **Multi-source search** | Remotive (free), JSearch/RapidAPI (LinkedIn + Indeed + Glassdoor …), Adzuna |
 | **Smart ranking** | OpenAI embeddings → sentence-transformers → TF-IDF cosine (best available) |
-| **Skill gap analysis** | Shows matched skills ✅ and skills to develop 📚 per job |
+| **Skill gap analysis** | Shows matched skills and skills to develop 📚 per job |
 | **Filters** | Min score, remote-only, source filter |
 | **One-click apply** | Direct link to the application page for every job |
 | **No-key mode** | Works out of the box using the free Remotive API |
