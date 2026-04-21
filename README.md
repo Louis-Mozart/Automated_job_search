@@ -114,7 +114,7 @@ Final score = 0.65 × semantic + 0.35 × keyword_overlap
 
 ---
 
-## 📸 App Flow
+## App Flow
 
 ```
 ┌──────────────────────────────────────────────┐
