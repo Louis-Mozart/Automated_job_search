@@ -6,7 +6,7 @@ An AI-powered automated job search application. Provide your **CV** (PDF/DOCX/TX
 2. Search multiple job boards in parallel (LinkedIn/Indeed via JSearch, Adzuna, Remotive).
 3. Rank every result by semantic match score and return your **top-k** jobs.
 4. Let you open each application link directly from the UI.
-
+5. 
 ---
 
 ## Features
