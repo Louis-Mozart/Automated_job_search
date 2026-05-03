@@ -25,13 +25,13 @@ An AI-powered automated job search application. Provide your **CV** (PDF/DOCX/TX
 
 ## Quick Start
 
-### 1 — Clone / open the project
+### 1 Clone / open the project
 
 ```bash
 cd /home/dice/Automated_job_search
 ```
 
-### 2 — Create and activate a virtual environment
+### 2 Create and activate a virtual environment
 
 ```bash
 python -m venv .venv
@@ -39,7 +39,7 @@ source .venv/bin/activate        # Linux / macOS
 # .venv\Scripts\activate         # Windows
 ```
 
-### 3 — Install dependencies
+### 3 Install dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -49,7 +49,7 @@ pip install -r requirements.txt
 > on first use. If you supply an OpenAI key, it is used instead, and the model is
 > never downloaded.
 
-### 4 — Configure API keys (optional but recommended)
+### 4 Configure API keys (optional but recommended)
 
 ```bash
 cp .env.example .env
